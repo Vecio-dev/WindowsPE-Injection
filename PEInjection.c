@@ -12,6 +12,8 @@ int main(int argc, char *argv[]) {
     const char* payloadFilename = argv[2];
     size_t payloadSize = 0;
     unsigned char* payload = convert_bin_to_array(payloadFilename, &payloadSize);
+    // size_t payloadSize = sizeof(payload);
+
     if (payload == NULL) {
         fprintf(stderr, "Conversion of %s failed.\n", payloadFilename);
         return 1;
@@ -31,7 +33,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    LPVOID pMapView = MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+    void* pMapView = MapViewOfFile(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, 0);
     if (pMapView == NULL) {
         printf("Failed to create map view\n");
         return 1;
@@ -41,7 +43,7 @@ int main(int argc, char *argv[]) {
 
     char* pData = (char*)pMapView; // Pointer to the start of the file
     IMAGE_DOS_HEADER* pDosHeader = (IMAGE_DOS_HEADER*)pData;
-    PBYTE pNtHeaderBase = (PBYTE)(pData + pDosHeader->e_lfanew);
+    unsigned char* pNtHeaderBase = (unsigned char*)(pData + pDosHeader->e_lfanew);
 
     DWORD originalEntryRVA = 0;
     WORD numberOfSections = 0;
